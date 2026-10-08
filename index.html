@@ -4,14 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Belt Wear Measurement WebApp</title>
-<!-- React & ReactDOM -->
     <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
     <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-    <!-- Babel for in-browser JSX transpilation -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.22.20/babel.min.js"></script>
-    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Recharts -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.0/Recharts.js"></script>
 </head>
@@ -19,10 +15,10 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useMemo, useEffect, useRef } = React;
-        const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } = window.Recharts;
+        const { useState, useEffect } = React;
+        const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine, ReferenceDot } = window.Recharts;
 
-        // --- Basic Signal Processing & Math Equivalents in JS ---
+        // --- Helpers ---
         function extractFirstNumber(str) {
             const match = str.match(/[-+]?(?:\d*\.\d+|\d+)/);
             return match ? parseFloat(match[0]) : null;
@@ -38,7 +34,6 @@
                 }
             }
             if (profileStartIdx === -1) throw new Error("Could not find Profile section.");
-            
             const values = [];
             for (let i = profileStartIdx; i < lines.length; i++) {
                 const num = extractFirstNumber(lines[i]);
@@ -53,12 +48,10 @@
             if (win % 2 === 0) win += 1;
             if (win >= n) win = n % 2 === 0 ? n - 1 : n - 2;
             if (win < 5) return [...y];
-
             const smoothed = new Array(n).fill(0);
             const halfWin = Math.floor(win / 2);
             for (let i = 0; i < n; i++) {
-                let sum = 0;
-                let count = 0;
+                let sum = 0, count = 0;
                 for (let j = Math.max(0, i - halfWin); j <= Math.min(n - 1, i + halfWin); j++) {
                     sum += y[j];
                     count++;
@@ -68,11 +61,56 @@
             return smoothed;
         }
 
-        // --- Main App Component ---
+        // Basic peak finder
+        function findPeaks(y, minDistance) {
+            let peaks = [];
+            for (let i = 1; i < y.length - 1; i++) {
+                if (y[i] > y[i - 1] && y[i] > y[i + 1]) {
+                    peaks.push(i);
+                }
+            }
+            // Filter by distance
+            let filtered = [];
+            peaks.sort((a, b) => y[b] - y[a]); // Sort by height desc
+            for (let p of peaks) {
+                if (filtered.every(f => Math.abs(f - p) >= minDistance)) {
+                    filtered.push(p);
+                }
+            }
+            return filtered.sort((a, b) => a - b); // Sort left to right
+        }
+
+        // Find width at given Y level around a peak
+        function getToothWidthAndCrossings(yArr, xArr, peakIdx, yLevel) {
+            let leftX = null, rightX = null;
+            // Search left
+            for (let i = peakIdx; i > 0; i--) {
+                if (yArr[i] >= yLevel && yArr[i - 1] < yLevel) {
+                    let t = (yLevel - yArr[i-1]) / (yArr[i] - yArr[i-1]);
+                    leftX = xArr[i-1] + t * (xArr[i] - xArr[i-1]);
+                    break;
+                }
+            }
+            // Search right
+            for (let i = peakIdx; i < yArr.length - 1; i++) {
+                if (yArr[i] >= yLevel && yArr[i + 1] < yLevel) {
+                    let t = (yLevel - yArr[i]) / (yArr[i+1] - yArr[i]);
+                    rightX = xArr[i] + t * (xArr[i+1] - xArr[i]);
+                    break;
+                }
+            }
+            if (leftX !== null && rightX !== null) {
+                return { leftX, rightX, width: rightX - leftX, centerX: (leftX + rightX) / 2 };
+            }
+            return null;
+        }
+
         function App() {
             const [preFile, setPreFile] = useState(null);
             const [postFile, setPostFile] = useState(null);
             const [chartData, setChartData] = useState([]);
+            const [hWearAnnotations, setHWearAnnotations] = useState([]);
+            const [vWearAnnotations, setVWearAnnotations] = useState([]);
             const [settings, setSettings] = useState({
                 stepUm: 5.23,
                 targetValleyY: 2800.0,
@@ -85,7 +123,6 @@
             const handleFileUpload = async (e, type) => {
                 const file = e.target.files[0];
                 if (!file) return;
-                
                 const text = await file.text();
                 try {
                     const parsed = parseProfileFile(text);
@@ -100,22 +137,88 @@
             const processFiles = () => {
                 if (!preFile || !postFile) return;
                 
-                // 1. Basic Smoothing
-                const preSmooth = smoothProfile(preFile.data);
-                const postSmooth = smoothProfile(postFile.data);
-
-                // 2. Generate Chart Data (simplified visual overlay without full offset math for browser performance limits)
-                const data = [];
-                const maxLen = Math.max(preSmooth.length, postSmooth.length);
+                const preRaw = preFile.data;
+                const postRaw = postFile.data;
+                const maxLen = Math.max(preRaw.length, postRaw.length);
                 
-                // Aligning visually for demonstration in the webapp (mocking the complex Python pipeline)
-                const offset = preSmooth[0] - postSmooth[0]; 
+                // 1. Basic Smoothing
+                const preSmooth = smoothProfile(preRaw);
+                const postSmooth = smoothProfile(postRaw);
 
-                for (let i = 0; i < maxLen; i+=10) { // Downsampling for chart performance
+                // 2. Generate X arrays
+                const xPre = Array.from({length: preRaw.length}, (_, i) => i * settings.stepUm);
+                const xPost = Array.from({length: postRaw.length}, (_, i) => i * settings.stepUm);
+
+                // For web demonstration, simple Y and X offset alignment
+                let yOffset = 0;
+                let xShift = 0;
+                
+                // Align visually
+                yOffset = preSmooth[0] - postSmooth[0]; 
+                
+                const yLevels = settings.wearYLevels.split(',').map(s => parseFloat(s.trim())).filter(n => !isNaN(n));
+
+                // Find peaks (min distance roughly 1000um)
+                const minDistSamples = Math.floor(1000 / settings.stepUm);
+                let prePeaks = findPeaks(preSmooth, minDistSamples);
+                let postPeaks = findPeaks(postSmooth, minDistSamples);
+                
+                let hWear = [];
+                let vWear = [];
+
+                let teethCount = Math.min(prePeaks.length, postPeaks.length);
+                
+                for(let t=0; t<teethCount; t++) {
+                    const preP = prePeaks[t];
+                    const postP = postPeaks[t];
+                    
+                    const pX = xPre[preP];
+                    const pYPre = preRaw[preP];
+                    const pYPost = postRaw[postP] ? postRaw[postP] + yOffset : null;
+
+                    // Vertical Wear
+                    if (pYPost !== null) {
+                        const vw = pYPre - pYPost;
+                        vWear.push({
+                            toothNum: t + 1,
+                            x: pX,
+                            y: Math.max(pYPre, pYPost) + 100,
+                            wear: vw
+                        });
+                    }
+
+                    // Horizontal Wear
+                    yLevels.forEach(level => {
+                        const preW = getToothWidthAndCrossings(preRaw, xPre, preP, level);
+                        // Using a dummy post array with offset for width calculation logic
+                        const postYShifted = postRaw.map(v => v + yOffset);
+                        const postW = getToothWidthAndCrossings(postYShifted, xPost, postP, level);
+
+                        if (preW && postW) {
+                            hWear.push({
+                                toothNum: t + 1,
+                                yLevel: level,
+                                centerX: (preW.centerX + postW.centerX) / 2,
+                                wear: preW.width - postW.width,
+                                preLeft: preW.leftX,
+                                preRight: preW.rightX,
+                                postLeft: postW.leftX,
+                                postRight: postW.rightX
+                            });
+                        }
+                    });
+                }
+
+                setHWearAnnotations(hWear);
+                setVWearAnnotations(vWear);
+
+                // Prepare Chart Data (downsampled for performance)
+                const data = [];
+                for (let i = 0; i < maxLen; i+=5) {
                     data.push({
                         x: i * settings.stepUm,
-                        preY: preFile.data[i] || null,
-                        postY: postFile.data[i] ? postFile.data[i] + offset : null
+                        preY: preRaw[i] || null,
+                        postY: postRaw[i] ? postRaw[i] + yOffset : null
                     });
                 }
                 setChartData(data);
@@ -131,13 +234,11 @@
                 <div className="max-w-7xl mx-auto p-6">
                     <header className="mb-8">
                         <h1 className="text-3xl font-bold text-gray-800">Belt Wear Measurement</h1>
-                        <p className="text-gray-600 mt-2">Web adaptation of the Belt Wear Measurement script</p>
+                        <p className="text-gray-600 mt-2">Web adaptation with Horizontal & Vertical Wear Overlays</p>
                     </header>
 
                     {error && (
-                        <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-6">
-                            {error}
-                        </div>
+                        <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-6">{error}</div>
                     )}
 
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
@@ -155,48 +256,70 @@
 
                         <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 md:col-span-2">
                             <h2 className="text-lg font-semibold mb-4">2. Settings</h2>
-                         <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                                    <div>
-                                        <label className="block text-sm font-medium text-gray-700">Step (µm)</label>
-                                        <input type="number" step="0.01" value={settings.stepUm} onChange={e => setSettings({...settings, stepUm: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2 border" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium text-gray-700">Target Valley Y</label>
-                                        <input type="number" value={settings.targetValleyY} onChange={e => setSettings({...settings, targetValleyY: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2 border" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium text-gray-700">Align Tooth #</label>
-                                        <input type="number" value={settings.alignToothNumber} onChange={e => setSettings({...settings, alignToothNumber: parseInt(e.target.value)})} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2 border" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium text-gray-700">Offset Mode</label>
-                                        <select value={settings.offsetMode} onChange={e => setSettings({...settings, offsetMode: e.target.value})} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2 border bg-white">
-                                            <option value="mean">Mean (Average)</option>
-                                            <option value="min">Min (Lowest)</option>
-                                        </select>
-                                    </div>
-                                    <div className="col-span-2">
-                                        <label className="block text-sm font-medium text-gray-700">Wear Y Levels (CSV)</label>
-                                        <input type="text" value={settings.wearYLevels} onChange={e => setSettings({...settings, wearYLevels: e.target.value})} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2 border" placeholder="4000, 5000, 6000" />
-                                    </div>
-                                </div>   
+                            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700">Step (µm)</label>
+                                    <input type="number" step="0.01" value={settings.stepUm} onChange={e => setSettings({...settings, stepUm: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2 border" />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700">Target Valley Y</label>
+                                    <input type="number" value={settings.targetValleyY} onChange={e => setSettings({...settings, targetValleyY: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2 border" />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700">Align Tooth #</label>
+                                    <input type="number" value={settings.alignToothNumber} onChange={e => setSettings({...settings, alignToothNumber: parseInt(e.target.value)})} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2 border" />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700">Offset Mode</label>
+                                    <select value={settings.offsetMode} onChange={e => setSettings({...settings, offsetMode: e.target.value})} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2 border bg-white">
+                                        <option value="mean">Mean (Average)</option>
+                                        <option value="min">Min (Lowest)</option>
+                                    </select>
+                                </div>
+                                <div className="col-span-2">
+                                    <label className="block text-sm font-medium text-gray-700">Wear Y Levels (CSV)</label>
+                                    <input type="text" value={settings.wearYLevels} onChange={e => setSettings({...settings, wearYLevels: e.target.value})} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2 border" placeholder="4000, 5000, 6000" />
+                                </div>
+                            </div>
                         </div>
                     </div>
 
                     <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
                         <h2 className="text-lg font-semibold mb-4">3. Wear Visualization</h2>
                         {chartData.length > 0 ? (
-                            <div className="h-96 w-full">
+                            <div className="h-[600px] w-full">
                                 <ResponsiveContainer width="100%" height="100%">
-                                    <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
+                                    <LineChart data={chartData} margin={{ top: 40, right: 30, left: 20, bottom: 20 }}>
                                         <CartesianGrid strokeDasharray="3 3" opacity={0.5} />
                                         <XAxis dataKey="x" type="number" label={{ value: 'X Position (µm)', position: 'insideBottom', offset: -10 }} domain={['dataMin', 'dataMax']} />
                                         <YAxis label={{ value: 'Y Position (µm)', angle: -90, position: 'insideLeft' }} domain={['auto', 'auto']} />
                                         <Tooltip formatter={(value) => value ? value.toFixed(2) : null} labelFormatter={(label) => `X: ${label.toFixed(2)}`} />
-                                        <Legend verticalAlign="top" height={36}/>
-                                        <Line type="monotone" dataKey="preY" name={`Pre: ${preFile.name}`} stroke="#3b82f6" dot={false} strokeWidth={2} />
-                                        <Line type="monotone" dataKey="postY" name={`Post: ${postFile.name}`} stroke="#f97316" strokeDasharray="5 5" dot={false} strokeWidth={2} />
-                                        <ReferenceLine y={settings.targetValleyY} label="Target Valley" stroke="black" strokeDasharray="3 3" />
+                                        <Legend verticalAlign="bottom" height={36}/>
+                                        
+                                        <Line type="monotone" dataKey="preY" name={`Pre: ${preFile.name}`} stroke="#3b82f6" dot={false} strokeWidth={2} isAnimationActive={false} />
+                                        <Line type="monotone" dataKey="postY" name={`Post: ${postFile.name}`} stroke="#f97316" strokeDasharray="5 5" dot={false} strokeWidth={2} isAnimationActive={false} />
+                                        
+                                        <ReferenceLine y={settings.targetValleyY} label={{position: 'insideBottomRight', value: `y = ${settings.targetValleyY} µm`}} stroke="black" strokeDasharray="3 3" />
+
+                                        {/* Horizontal Wear Guide Lines */}
+                                        {settings.wearYLevels.split(',').map(l => parseFloat(l)).map((level, i) => (
+                                            <ReferenceLine key={`ylvl-${i}`} y={level} stroke="lightgray" strokeDasharray="3 3" />
+                                        ))}
+
+                                        {/* Horizontal Wear Segments and Labels */}
+                                        {hWearAnnotations.map((h, i) => (
+                                            <React.Fragment key={`h-${i}`}>
+                                                <ReferenceLine segment={{x1: h.preLeft, y1: h.yLevel, x2: h.preRight, y2: h.yLevel}} stroke="#3b82f6" strokeWidth={3} />
+                                                <ReferenceLine segment={{x1: h.postLeft, y1: h.yLevel, x2: h.postRight, y2: h.yLevel}} stroke="#f97316" strokeWidth={3} strokeDasharray="4 4" />
+                                                <ReferenceDot x={h.centerX} y={h.yLevel} r={0} label={{ position: 'top', value: `H${h.toothNum}: ${h.wear.toFixed(1)}`, fill: 'purple', fontSize: 12, fontWeight: 'bold' }} />
+                                            </React.Fragment>
+                                        ))}
+
+                                        {/* Vertical Wear Labels */}
+                                        {vWearAnnotations.map((v, i) => (
+                                            <ReferenceDot key={`v-${i}`} x={v.x} y={v.y} r={0} label={{ position: 'top', value: `V${v.toothNum}: ${v.wear.toFixed(1)}`, fill: 'green', fontSize: 12, fontWeight: 'bold' }} />
+                                        ))}
+
                                     </LineChart>
                                 </ResponsiveContainer>
                             </div>
