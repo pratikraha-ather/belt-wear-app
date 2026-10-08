@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Belt Wear Measurement WebApp</title>
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel for in-browser JSX transpilation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Recharts -->
+    <script src="https://unpkg.com/prop-types/prop-types.min.js"></script>
+    <script src="https://unpkg.com/recharts/umd/Recharts.js"></script>
+</head>
+<body class="bg-gray-50 text-gray-900 font-sans antialiased">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useMemo, useEffect, useRef } = React;
+        const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } = window.Recharts;
+
+        // --- Basic Signal Processing & Math Equivalents in JS ---
+        function extractFirstNumber(str) {
+            const match = str.match(/[-+]?(?:\d*\.\d+|\d+)/);
+            return match ? parseFloat(match[0]) : null;
+        }
+
+        function parseProfileFile(csvText) {
+            const lines = csvText.split('\n').map(l => l.trim()).filter(l => l);
+            let profileStartIdx = -1;
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].toLowerCase().startsWith('"profile') || lines[i].toLowerCase().startsWith('profile')) {
+                    profileStartIdx = i + 1;
+                    break;
+                }
+            }
+            if (profileStartIdx === -1) throw new Error("Could not find Profile section.");
+            
+            const values = [];
+            for (let i = profileStartIdx; i < lines.length; i++) {
+                const num = extractFirstNumber(lines[i]);
+                if (num !== null) values.push(num);
+            }
+            return values;
+        }
+
+        function smoothProfile(y) {
+            const n = y.length;
+            let win = Math.max(51, Math.floor(n / 150));
+            if (win % 2 === 0) win += 1;
+            if (win >= n) win = n % 2 === 0 ? n - 1 : n - 2;
+            if (win < 5) return [...y];
+
+            const smoothed = new Array(n).fill(0);
+            const halfWin = Math.floor(win / 2);
+            for (let i = 0; i < n; i++) {
+                let sum = 0;
+                let count = 0;
+                for (let j = Math.max(0, i - halfWin); j <= Math.min(n - 1, i + halfWin); j++) {
+                    sum += y[j];
+                    count++;
+                }
+                smoothed[i] = sum / count;
+            }
+            return smoothed;
+        }
+
+        // --- Main App Component ---
+        function App() {
+            const [preFile, setPreFile] = useState(null);
+            const [postFile, setPostFile] = useState(null);
+            const [chartData, setChartData] = useState([]);
+            const [settings, setSettings] = useState({
+                stepUm: 5.23,
+                targetValleyY: 2800.0,
+                alignToothNumber: 3
+            });
+            const [error, setError] = useState("");
+
+            const handleFileUpload = async (e, type) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                
+                const text = await file.text();
+                try {
+                    const parsed = parseProfileFile(text);
+                    if (type === 'pre') setPreFile({ name: file.name, data: parsed });
+                    else setPostFile({ name: file.name, data: parsed });
+                    setError("");
+                } catch (err) {
+                    setError(`Error parsing ${type} file: ${err.message}`);
+                }
+            };
+
+            const processFiles = () => {
+                if (!preFile || !postFile) return;
+                
+                // 1. Basic Smoothing
+                const preSmooth = smoothProfile(preFile.data);
+                const postSmooth = smoothProfile(postFile.data);
+
+                // 2. Generate Chart Data (simplified visual overlay without full offset math for browser performance limits)
+                const data = [];
+                const maxLen = Math.max(preSmooth.length, postSmooth.length);
+                
+                // Aligning visually for demonstration in the webapp (mocking the complex Python pipeline)
+                const offset = preSmooth[0] - postSmooth[0]; 
+
+                for (let i = 0; i < maxLen; i+=10) { // Downsampling for chart performance
+                    data.push({
+                        x: i * settings.stepUm,
+                        preY: preFile.data[i] || null,
+                        postY: postFile.data[i] ? postFile.data[i] + offset : null
+                    });
+                }
+                setChartData(data);
+            };
+
+            useEffect(() => {
+                if (preFile && postFile) {
+                    processFiles();
+                }
+            }, [preFile, postFile, settings]);
+
+            return (
+                <div className="max-w-7xl mx-auto p-6">
+                    <header className="mb-8">
+                        <h1 className="text-3xl font-bold text-gray-800">Belt Wear Measurement</h1>
+                        <p className="text-gray-600 mt-2">Web adaptation of the Belt Wear Measurement script</p>
+                    </header>
+
+                    {error && (
+                        <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-6">
+                            {error}
+                        </div>
+                    )}
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+                            <h2 className="text-lg font-semibold mb-4">1. Data Input</h2>
+                            <div className="mb-4">
+                                <label className="block text-sm font-medium text-gray-700 mb-1">PRE-test CSV</label>
+                                <input type="file" accept=".csv" onChange={(e) => handleFileUpload(e, 'pre')} className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">POST-test CSV</label>
+                                <input type="file" accept=".csv" onChange={(e) => handleFileUpload(e, 'post')} className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-orange-50 file:text-orange-700 hover:file:bg-orange-100" />
+                            </div>
+                        </div>
+
+                        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 md:col-span-2">
+                            <h2 className="text-lg font-semibold mb-4">2. Settings</h2>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700">Step (µm)</label>
+                                    <input type="number" step="0.01" value={settings.stepUm} onChange={e => setSettings({...settings, stepUm: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2 border" />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700">Target Valley Y</label>
+                                    <input type="number" value={settings.targetValleyY} onChange={e => setSettings({...settings, targetValleyY: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2 border" />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700">Align Tooth #</label>
+                                    <input type="number" value={settings.alignToothNumber} onChange={e => setSettings({...settings, alignToothNumber: parseInt(e.target.value)})} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2 border" />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+                        <h2 className="text-lg font-semibold mb-4">3. Wear Visualization</h2>
+                        {chartData.length > 0 ? (
+                            <div className="h-96 w-full">
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
+                                        <CartesianGrid strokeDasharray="3 3" opacity={0.5} />
+                                        <XAxis dataKey="x" type="number" label={{ value: 'X Position (µm)', position: 'insideBottom', offset: -10 }} domain={['dataMin', 'dataMax']} />
+                                        <YAxis label={{ value: 'Y Position (µm)', angle: -90, position: 'insideLeft' }} domain={['auto', 'auto']} />
+                                        <Tooltip formatter={(value) => value ? value.toFixed(2) : null} labelFormatter={(label) => `X: ${label.toFixed(2)}`} />
+                                        <Legend verticalAlign="top" height={36}/>
+                                        <Line type="monotone" dataKey="preY" name={`Pre: ${preFile.name}`} stroke="#3b82f6" dot={false} strokeWidth={2} />
+                                        <Line type="monotone" dataKey="postY" name={`Post: ${postFile.name}`} stroke="#f97316" strokeDasharray="5 5" dot={false} strokeWidth={2} />
+                                        <ReferenceLine y={settings.targetValleyY} label="Target Valley" stroke="black" strokeDasharray="3 3" />
+                                    </LineChart>
+                                </ResponsiveContainer>
+                            </div>
+                        ) : (
+                            <div className="h-96 w-full flex items-center justify-center bg-gray-50 border-2 border-dashed border-gray-200 rounded-md">
+                                <p className="text-gray-500">Upload PRE and POST files to view the chart.</p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
