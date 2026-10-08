@@ -61,7 +61,6 @@
             return smoothed;
         }
 
-        // Basic peak finder
         function findPeaks(y, minDistance) {
             let peaks = [];
             for (let i = 1; i < y.length - 1; i++) {
@@ -69,21 +68,18 @@
                     peaks.push(i);
                 }
             }
-            // Filter by distance
             let filtered = [];
-            peaks.sort((a, b) => y[b] - y[a]); // Sort by height desc
+            peaks.sort((a, b) => y[b] - y[a]);
             for (let p of peaks) {
                 if (filtered.every(f => Math.abs(f - p) >= minDistance)) {
                     filtered.push(p);
                 }
             }
-            return filtered.sort((a, b) => a - b); // Sort left to right
+            return filtered.sort((a, b) => a - b);
         }
 
-        // Find width at given Y level around a peak
         function getToothWidthAndCrossings(yArr, xArr, peakIdx, yLevel) {
             let leftX = null, rightX = null;
-            // Search left
             for (let i = peakIdx; i > 0; i--) {
                 if (yArr[i] >= yLevel && yArr[i - 1] < yLevel) {
                     let t = (yLevel - yArr[i-1]) / (yArr[i] - yArr[i-1]);
@@ -91,7 +87,6 @@
                     break;
                 }
             }
-            // Search right
             for (let i = peakIdx; i < yArr.length - 1; i++) {
                 if (yArr[i] >= yLevel && yArr[i + 1] < yLevel) {
                     let t = (yLevel - yArr[i]) / (yArr[i+1] - yArr[i]);
@@ -103,6 +98,53 @@
                 return { leftX, rightX, width: rightX - leftX, centerX: (leftX + rightX) / 2 };
             }
             return null;
+        }
+
+        function computeYOffset(yArr, mode, targetY) {
+            if (mode === 'min') {
+                return targetY - Math.min(...yArr);
+            }
+            let minima = [];
+            for(let i=1; i<yArr.length-1; i++) {
+                if(yArr[i] < yArr[i-1] && yArr[i] < yArr[i+1]) {
+                    minima.push(yArr[i]);
+                }
+            }
+            minima.sort((a,b) => a-b);
+            let validMins = minima.slice(0, Math.max(1, Math.floor(minima.length * 0.1))); 
+            if(validMins.length === 0) validMins = [Math.min(...yArr)];
+            let meanMin = validMins.reduce((a,b)=>a+b, 0) / validMins.length;
+            return targetY - meanMin;
+        }
+
+        function linearRegression(x, y) {
+            const n = x.length;
+            let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+            for (let i = 0; i < n; i++) {
+                sumX += x[i]; sumY += y[i];
+                sumXY += x[i] * y[i]; sumXX += x[i] * x[i];
+            }
+            const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+            const intercept = (sumY - slope * sumX) / n;
+            return { slope, intercept };
+        }
+
+        const CENTERLINE_Y_LEVELS = [4000, 4500, 5000, 5500, 6000];
+        const CENTERLINE_REF_Y = 5000;
+
+        function computeCenterlineRefX(yArr, xArr, peakIdx) {
+            let midpointsX = [];
+            let validYLevels = [];
+            for (let yLevel of CENTERLINE_Y_LEVELS) {
+                let w = getToothWidthAndCrossings(yArr, xArr, peakIdx, yLevel);
+                if (w) {
+                    midpointsX.push(w.centerX);
+                    validYLevels.push(yLevel);
+                }
+            }
+            if (validYLevels.length < 2) return null;
+            const { slope, intercept } = linearRegression(validYLevels, midpointsX);
+            return slope * CENTERLINE_REF_Y + intercept;
         }
 
         function App() {
@@ -137,91 +179,125 @@
             const processFiles = () => {
                 if (!preFile || !postFile) return;
                 
-                const preRaw = preFile.data;
-                const postRaw = postFile.data;
-                const maxLen = Math.max(preRaw.length, postRaw.length);
-                
-                // 1. Basic Smoothing
-                const preSmooth = smoothProfile(preRaw);
-                const postSmooth = smoothProfile(postRaw);
-
-                // 2. Generate X arrays
-                const xPre = Array.from({length: preRaw.length}, (_, i) => i * settings.stepUm);
-                const xPost = Array.from({length: postRaw.length}, (_, i) => i * settings.stepUm);
-
-                // For web demonstration, simple Y and X offset alignment
-                let yOffset = 0;
-                let xShift = 0;
-                
-                // Align visually
-                yOffset = preSmooth[0] - postSmooth[0]; 
-                
-                const yLevels = settings.wearYLevels.split(',').map(s => parseFloat(s.trim())).filter(n => !isNaN(n));
-
-                // Find peaks (min distance roughly 1000um)
-                const minDistSamples = Math.floor(1000 / settings.stepUm);
-                let prePeaks = findPeaks(preSmooth, minDistSamples);
-                let postPeaks = findPeaks(postSmooth, minDistSamples);
-                
-                let hWear = [];
-                let vWear = [];
-
-                let teethCount = Math.min(prePeaks.length, postPeaks.length);
-                
-                for(let t=0; t<teethCount; t++) {
-                    const preP = prePeaks[t];
-                    const postP = postPeaks[t];
+                try {
+                    const preRaw = preFile.data;
+                    const postRaw = postFile.data;
                     
-                    const pX = xPre[preP];
-                    const pYPre = preRaw[preP];
-                    const pYPost = postRaw[postP] ? postRaw[postP] + yOffset : null;
+                    const preSmooth = smoothProfile(preRaw);
+                    const postSmooth = smoothProfile(postRaw);
 
-                    // Vertical Wear
-                    if (pYPost !== null) {
-                        const vw = pYPre - pYPost;
-                        vWear.push({
-                            toothNum: t + 1,
-                            x: pX,
-                            y: Math.max(pYPre, pYPost) + 100,
-                            wear: vw
+                    const xPre = Array.from({length: preRaw.length}, (_, i) => i * settings.stepUm);
+                    const xPost = Array.from({length: postRaw.length}, (_, i) => i * settings.stepUm);
+
+                    // 1. Y Offset
+                    let preYOffset = computeYOffset(preSmooth, settings.offsetMode, settings.targetValleyY);
+                    let postYOffset = computeYOffset(postSmooth, settings.offsetMode, settings.targetValleyY);
+                    
+                    let preYShifted = preRaw.map(v => v + preYOffset);
+                    let postYShifted = postRaw.map(v => v + postYOffset);
+                    
+                    let preSmoothShifted = preSmooth.map(v => v + preYOffset);
+                    let postSmoothShifted = postSmooth.map(v => v + postYOffset);
+
+                    // 2. Find Peaks
+                    const minDistSamples = Math.floor(1000 / settings.stepUm);
+                    let prePeaks = findPeaks(preSmoothShifted, minDistSamples);
+                    let postPeaks = findPeaks(postSmoothShifted, minDistSamples);
+
+                    // 3. X Alignment (Centerline of chosen tooth)
+                    const alignIdx = settings.alignToothNumber - 1;
+                    let xShiftPost = 0;
+
+                    if (prePeaks.length > alignIdx && postPeaks.length > alignIdx) {
+                        let refXPre = computeCenterlineRefX(preYShifted, xPre, prePeaks[alignIdx]);
+                        let refXPost = computeCenterlineRefX(postYShifted, xPost, postPeaks[alignIdx]);
+                        
+                        if (refXPre !== null && refXPost !== null) {
+                            xShiftPost = refXPre - refXPost;
+                        } else {
+                            console.warn("Could not compute centerline for alignment tooth. Defaulting to peak alignment.");
+                            xShiftPost = xPre[prePeaks[alignIdx]] - xPost[postPeaks[alignIdx]];
+                        }
+                    } else {
+                        throw new Error(`Alignment tooth #${settings.alignToothNumber} not found. Pre teeth: ${prePeaks.length}, Post teeth: ${postPeaks.length}`);
+                    }
+
+                    let xPostShifted = xPost.map(x => x + xShiftPost);
+
+                    // 4. Calculate Wear
+                    const yLevels = settings.wearYLevels.split(',').map(s => parseFloat(s.trim())).filter(n => !isNaN(n));
+                    let hWear = [];
+                    let vWear = [];
+                    let teethCount = Math.min(prePeaks.length, postPeaks.length);
+                    
+                    for(let t=0; t<teethCount; t++) {
+                        const preP = prePeaks[t];
+                        const postP = postPeaks[t];
+                        
+                        const pYPre = preYShifted[preP];
+                        const pYPost = postYShifted[postP];
+                        
+                        const avgX = (xPre[preP] + xPostShifted[postP]) / 2;
+
+                        if (pYPost !== null) {
+                            vWear.push({
+                                toothNum: t + 1,
+                                x: avgX,
+                                y: Math.max(pYPre, pYPost) + 120,
+                                wear: pYPre - pYPost
+                            });
+                        }
+
+                        yLevels.forEach(level => {
+                            const preW = getToothWidthAndCrossings(preYShifted, xPre, preP, level);
+                            const postW = getToothWidthAndCrossings(postYShifted, xPostShifted, postP, level);
+
+                            if (preW && postW) {
+                                hWear.push({
+                                    toothNum: t + 1,
+                                    yLevel: level,
+                                    centerX: (preW.centerX + postW.centerX) / 2,
+                                    wear: preW.width - postW.width,
+                                    preLeft: preW.leftX,
+                                    preRight: preW.rightX,
+                                    postLeft: postW.leftX,
+                                    postRight: postW.rightX
+                                });
+                            }
                         });
                     }
 
-                    // Horizontal Wear
-                    yLevels.forEach(level => {
-                        const preW = getToothWidthAndCrossings(preRaw, xPre, preP, level);
-                        // Using a dummy post array with offset for width calculation logic
-                        const postYShifted = postRaw.map(v => v + yOffset);
-                        const postW = getToothWidthAndCrossings(postYShifted, xPost, postP, level);
+                    setHWearAnnotations(hWear);
+                    setVWearAnnotations(vWear);
 
-                        if (preW && postW) {
-                            hWear.push({
-                                toothNum: t + 1,
-                                yLevel: level,
-                                centerX: (preW.centerX + postW.centerX) / 2,
-                                wear: preW.width - postW.width,
-                                preLeft: preW.leftX,
-                                preRight: preW.rightX,
-                                postLeft: postW.leftX,
-                                postRight: postW.rightX
-                            });
+                    // 5. Build Interleaved Chart Data
+                    const data = [];
+                    let i = 0, j = 0;
+                    const step = 4; // downsampling
+                    
+                    while (i < preYShifted.length || j < postYShifted.length) {
+                        if (i < preYShifted.length && j < postYShifted.length) {
+                            if (xPre[i] < xPostShifted[j]) {
+                                data.push({ x: xPre[i], preY: preYShifted[i] });
+                                i += step;
+                            } else {
+                                data.push({ x: xPostShifted[j], postY: postYShifted[j] });
+                                j += step;
+                            }
+                        } else if (i < preYShifted.length) {
+                            data.push({ x: xPre[i], preY: preYShifted[i] });
+                            i += step;
+                        } else {
+                            data.push({ x: xPostShifted[j], postY: postYShifted[j] });
+                            j += step;
                         }
-                    });
+                    }
+                    
+                    setChartData(data);
+                    setError("");
+                } catch (err) {
+                    setError(`Processing Error: ${err.message}`);
                 }
-
-                setHWearAnnotations(hWear);
-                setVWearAnnotations(vWear);
-
-                // Prepare Chart Data (downsampled for performance)
-                const data = [];
-                for (let i = 0; i < maxLen; i+=5) {
-                    data.push({
-                        x: i * settings.stepUm,
-                        preY: preRaw[i] || null,
-                        postY: postRaw[i] ? postRaw[i] + yOffset : null
-                    });
-                }
-                setChartData(data);
             };
 
             useEffect(() => {
@@ -234,7 +310,7 @@
                 <div className="max-w-7xl mx-auto p-6">
                     <header className="mb-8">
                         <h1 className="text-3xl font-bold text-gray-800">Belt Wear Measurement</h1>
-                        <p className="text-gray-600 mt-2">Web adaptation with Horizontal & Vertical Wear Overlays</p>
+                        <p className="text-gray-600 mt-2">Web adaptation with Centerline X-Alignment</p>
                     </header>
 
                     {error && (
@@ -296,17 +372,15 @@
                                         <Tooltip formatter={(value) => value ? value.toFixed(2) : null} labelFormatter={(label) => `X: ${label.toFixed(2)}`} />
                                         <Legend verticalAlign="bottom" height={36}/>
                                         
-                                        <Line type="monotone" dataKey="preY" name={`Pre: ${preFile.name}`} stroke="#3b82f6" dot={false} strokeWidth={2} isAnimationActive={false} />
-                                        <Line type="monotone" dataKey="postY" name={`Post: ${postFile.name}`} stroke="#f97316" strokeDasharray="5 5" dot={false} strokeWidth={2} isAnimationActive={false} />
+                                        <Line type="monotone" connectNulls={true} dataKey="preY" name={`Pre: ${preFile.name}`} stroke="#3b82f6" dot={false} strokeWidth={2} isAnimationActive={false} />
+                                        <Line type="monotone" connectNulls={true} dataKey="postY" name={`Post: ${postFile.name}`} stroke="#f97316" strokeDasharray="5 5" dot={false} strokeWidth={2} isAnimationActive={false} />
                                         
                                         <ReferenceLine y={settings.targetValleyY} label={{position: 'insideBottomRight', value: `y = ${settings.targetValleyY} µm`}} stroke="black" strokeDasharray="3 3" />
 
-                                        {/* Horizontal Wear Guide Lines */}
                                         {settings.wearYLevels.split(',').map(l => parseFloat(l)).map((level, i) => (
                                             <ReferenceLine key={`ylvl-${i}`} y={level} stroke="lightgray" strokeDasharray="3 3" />
                                         ))}
 
-                                        {/* Horizontal Wear Segments and Labels */}
                                         {hWearAnnotations.map((h, i) => (
                                             <React.Fragment key={`h-${i}`}>
                                                 <ReferenceLine segment={{x1: h.preLeft, y1: h.yLevel, x2: h.preRight, y2: h.yLevel}} stroke="#3b82f6" strokeWidth={3} />
@@ -315,7 +389,6 @@
                                             </React.Fragment>
                                         ))}
 
-                                        {/* Vertical Wear Labels */}
                                         {vWearAnnotations.map((v, i) => (
                                             <ReferenceDot key={`v-${i}`} x={v.x} y={v.y} r={0} label={{ position: 'top', value: `V${v.toothNum}: ${v.wear.toFixed(1)}`, fill: 'green', fontSize: 12, fontWeight: 'bold' }} />
                                         ))}
